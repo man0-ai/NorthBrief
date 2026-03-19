@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import yfinance as yf
 import anthropic
@@ -290,62 +291,73 @@ def fmt_p(v):
     if v is None: return "—"
     return f"${v:.2f}"
 
-def fetch_data(ticker):
-    t = yf.Ticker(ticker)
-    info = t.info
-    hist_1y = t.history(period="1y")
-    hist_1m = t.history(period="1mo")
-    hist_1w = t.history(period="7d")
-    try:
-        cal = t.calendar
-        next_earnings = None
-        if cal is not None and not cal.empty:
-            if 'Earnings Date' in cal.index:
-                ed = cal.loc['Earnings Date']
-                next_earnings = pd.to_datetime(ed.iloc[0]) if hasattr(ed, 'iloc') else pd.to_datetime(ed)
-    except:
-        next_earnings = None
-    try:
-        news = [n.get('title','') for n in (t.news or [])[:6]]
-    except:
-        news = []
-    price_1y = None
-    if not hist_1y.empty and len(hist_1y) > 1:
-        price_1y = (hist_1y['Close'].iloc[-1] - hist_1y['Close'].iloc[0]) / hist_1y['Close'].iloc[0]
-    return {
-        "symbol": ticker.upper(),
-        "name": info.get("shortName", ticker),
-        "sector": info.get("sector", ""),
-        "industry": info.get("industry", ""),
-        "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-        "prev_close": info.get("previousClose"),
-        "mkt_cap": info.get("marketCap"),
-        "pe": info.get("trailingPE"),
-        "fpe": info.get("forwardPE"),
-        "ps": info.get("priceToSalesTrailing12Months"),
-        "pb": info.get("priceToBook"),
-        "ev_ebitda": info.get("enterpriseToEbitda"),
-        "rev_growth": info.get("revenueGrowth"),
-        "gross_margin": info.get("grossMargins"),
-        "op_margin": info.get("operatingMargins"),
-        "net_margin": info.get("profitMargins"),
-        "roe": info.get("returnOnEquity"),
-        "de": info.get("debtToEquity"),
-        "cr": info.get("currentRatio"),
-        "52h": info.get("fiftyTwoWeekHigh"),
-        "52l": info.get("fiftyTwoWeekLow"),
-        "target": info.get("targetMeanPrice"),
-        "rec": info.get("recommendationKey","").upper(),
-        "desc": info.get("longBusinessSummary","")[:500],
-        "exchange": info.get("exchange","TSX"),
-        "hist_1y": hist_1y, "hist_1m": hist_1m, "hist_1w": hist_1w,
-        "next_earnings": next_earnings,
-        "news": news,
-        "price_1y": price_1y,
-        "beta": info.get("beta"),
-        "eps": info.get("trailingEps"),
-        "avg_volume": info.get("averageVolume"),
-    }
+def fetch_data(ticker, retries=3):
+    import time
+    last_error = None
+    for attempt in range(retries):
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info
+            if not info or len(info) < 5:
+                raise ValueError("Empty response from Yahoo Finance")
+            hist_1y = t.history(period="1y")
+            hist_1m = t.history(period="1mo")
+            hist_1w = t.history(period="7d")
+            try:
+                cal = t.calendar
+                next_earnings = None
+                if cal is not None and not cal.empty:
+                    if 'Earnings Date' in cal.index:
+                        ed = cal.loc['Earnings Date']
+                        next_earnings = pd.to_datetime(ed.iloc[0]) if hasattr(ed, 'iloc') else pd.to_datetime(ed)
+            except:
+                next_earnings = None
+            try:
+                news = [n.get('title','') for n in (t.news or [])[:6]]
+            except:
+                news = []
+            price_1y = None
+            if not hist_1y.empty and len(hist_1y) > 1:
+                price_1y = (hist_1y['Close'].iloc[-1] - hist_1y['Close'].iloc[0]) / hist_1y['Close'].iloc[0]
+            return {
+                "symbol": ticker.upper(),
+                "name": info.get("shortName", ticker),
+                "sector": info.get("sector", ""),
+                "industry": info.get("industry", ""),
+                "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+                "prev_close": info.get("previousClose"),
+                "mkt_cap": info.get("marketCap"),
+                "pe": info.get("trailingPE"),
+                "fpe": info.get("forwardPE"),
+                "ps": info.get("priceToSalesTrailing12Months"),
+                "pb": info.get("priceToBook"),
+                "ev_ebitda": info.get("enterpriseToEbitda"),
+                "rev_growth": info.get("revenueGrowth"),
+                "gross_margin": info.get("grossMargins"),
+                "op_margin": info.get("operatingMargins"),
+                "net_margin": info.get("profitMargins"),
+                "roe": info.get("returnOnEquity"),
+                "de": info.get("debtToEquity"),
+                "cr": info.get("currentRatio"),
+                "52h": info.get("fiftyTwoWeekHigh"),
+                "52l": info.get("fiftyTwoWeekLow"),
+                "target": info.get("targetMeanPrice"),
+                "rec": info.get("recommendationKey","").upper(),
+                "desc": info.get("longBusinessSummary","")[:500],
+                "exchange": info.get("exchange","TSX"),
+                "hist_1y": hist_1y, "hist_1m": hist_1m, "hist_1w": hist_1w,
+                "next_earnings": next_earnings,
+                "news": news,
+                "price_1y": price_1y,
+                "beta": info.get("beta"),
+                "eps": info.get("trailingEps"),
+                "avg_volume": info.get("averageVolume"),
+            }
+        except Exception as e:
+            last_error = e
+            if attempt < retries - 1:
+                time.sleep(2 + attempt * 2)
+    raise Exception(f"Rate limited. Try after a while. ({last_error})")
 
 def get_peers(sector, exchange, exclude):
     peer_map = {
@@ -534,6 +546,8 @@ with st.sidebar:
     st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-lbl">Anthropic API Key</div>', unsafe_allow_html=True)
     api_key = st.text_input("key", type="password", placeholder="sk-ant-...", label_visibility="collapsed")
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     st.markdown('<div class="sidebar-hint">console.anthropic.com<br>~$0.002 per brief</div>', unsafe_allow_html=True)
     st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-lbl">Mode</div>', unsafe_allow_html=True)
