@@ -547,7 +547,10 @@ with st.sidebar:
     st.markdown('<div class="sidebar-lbl">Anthropic API Key</div>', unsafe_allow_html=True)
     api_key = st.text_input("key", type="password", placeholder="sk-ant-...", label_visibility="collapsed")
     if not api_key:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        try:
+            api_key = st.secrets["ANTHROPIC_API_KEY"]
+        except:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     st.markdown('<div class="sidebar-hint">console.anthropic.com<br>~$0.002 per brief</div>', unsafe_allow_html=True)
     st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-lbl">Mode</div>', unsafe_allow_html=True)
