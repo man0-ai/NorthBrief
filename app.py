@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-import yfinance as yf
+import requests
 import anthropic
 import json
 import pandas as pd
@@ -291,73 +291,193 @@ def fmt_p(v):
     if v is None: return "—"
     return f"${v:.2f}"
 
-def fetch_data(ticker, retries=3):
+def av_get(params, av_key):
+    """Make a request to Alpha Vantage API."""
+    import requests
+    params["apikey"] = av_key
+    r = requests.get("https://www.alphavantage.co/query", params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def av_ticker(ticker):
+    """Convert TSX tickers to Alpha Vantage format. SHOP.TO -> SHOP.TRT etc."""
+    if ticker.endswith(".TO"):
+        return ticker.replace(".TO", ".TRT")
+    if ticker.endswith(".V"):
+        return ticker.replace(".V", ".CNX")
+    return ticker
+
+def fetch_data(ticker, av_key=None):
+    import requests
     import time
-    last_error = None
-    for attempt in range(retries):
-        try:
-            t = yf.Ticker(ticker)
-            info = t.info
-            if not info or len(info) < 5:
-                raise ValueError("Empty response from Yahoo Finance")
-            hist_1y = t.history(period="1y")
-            hist_1m = t.history(period="1mo")
-            hist_1w = t.history(period="7d")
-            try:
-                cal = t.calendar
-                next_earnings = None
-                if cal is not None and not cal.empty:
-                    if 'Earnings Date' in cal.index:
-                        ed = cal.loc['Earnings Date']
-                        next_earnings = pd.to_datetime(ed.iloc[0]) if hasattr(ed, 'iloc') else pd.to_datetime(ed)
-            except:
-                next_earnings = None
-            try:
-                news = [n.get('title','') for n in (t.news or [])[:6]]
-            except:
-                news = []
-            price_1y = None
-            if not hist_1y.empty and len(hist_1y) > 1:
-                price_1y = (hist_1y['Close'].iloc[-1] - hist_1y['Close'].iloc[0]) / hist_1y['Close'].iloc[0]
-            return {
+
+    sym = av_ticker(ticker.upper())
+
+    # ── Company Overview ─────────────────────────────────────────────────────
+    try:
+        overview = av_get({"function": "OVERVIEW", "symbol": sym}, av_key)
+        if not overview or "Symbol" not in overview:
+            # Try without exchange suffix for US tickers
+            overview = av_get({"function": "OVERVIEW", "symbol": ticker.upper()}, av_key)
+    except Exception:
+        overview = {}
+
+    # ── Global Quote (current price) ─────────────────────────────────────────
+    try:
+        quote_data = av_get({"function": "GLOBAL_QUOTE", "symbol": sym}, av_key)
+        quote = quote_data.get("Global Quote", {})
+        if not quote.get("05. price"):
+            quote_data = av_get({"function": "GLOBAL_QUOTE", "symbol": ticker.upper()}, av_key)
+            quote = quote_data.get("Global Quote", {})
+    except Exception:
+        quote = {}
+
+    # ── Daily price history ──────────────────────────────────────────────────
+    try:
+        hist_data = av_get({
+            "function": "TIME_SERIES_DAILY",
+            "symbol": sym,
+            "outputsize": "full"
+        }, av_key)
+        daily = hist_data.get("Time Series (Daily)", {})
+        if not daily:
+            hist_data = av_get({
+                "function": "TIME_SERIES_DAILY",
                 "symbol": ticker.upper(),
-                "name": info.get("shortName", ticker),
-                "sector": info.get("sector", ""),
-                "industry": info.get("industry", ""),
-                "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-                "prev_close": info.get("previousClose"),
-                "mkt_cap": info.get("marketCap"),
-                "pe": info.get("trailingPE"),
-                "fpe": info.get("forwardPE"),
-                "ps": info.get("priceToSalesTrailing12Months"),
-                "pb": info.get("priceToBook"),
-                "ev_ebitda": info.get("enterpriseToEbitda"),
-                "rev_growth": info.get("revenueGrowth"),
-                "gross_margin": info.get("grossMargins"),
-                "op_margin": info.get("operatingMargins"),
-                "net_margin": info.get("profitMargins"),
-                "roe": info.get("returnOnEquity"),
-                "de": info.get("debtToEquity"),
-                "cr": info.get("currentRatio"),
-                "52h": info.get("fiftyTwoWeekHigh"),
-                "52l": info.get("fiftyTwoWeekLow"),
-                "target": info.get("targetMeanPrice"),
-                "rec": info.get("recommendationKey","").upper(),
-                "desc": info.get("longBusinessSummary","")[:500],
-                "exchange": info.get("exchange","TSX"),
-                "hist_1y": hist_1y, "hist_1m": hist_1m, "hist_1w": hist_1w,
-                "next_earnings": next_earnings,
-                "news": news,
-                "price_1y": price_1y,
-                "beta": info.get("beta"),
-                "eps": info.get("trailingEps"),
-                "avg_volume": info.get("averageVolume"),
-            }
-        except Exception as e:
-            last_error = e
-            if attempt < retries - 1:
-                time.sleep(2 + attempt * 2)
-    raise Exception(f"Rate limited. Try after a while. ({last_error})")
+                "outputsize": "full"
+            }, av_key)
+            daily = hist_data.get("Time Series (Daily)", {})
+    except Exception:
+        daily = {}
+
+    # Build price history DataFrames
+    def build_hist(daily, days):
+        if not daily:
+            return pd.DataFrame()
+        sorted_dates = sorted(daily.keys(), reverse=True)[:days]
+        rows = []
+        for d in sorted(sorted_dates):
+            try:
+                rows.append({
+                    "Date": pd.to_datetime(d),
+                    "Close": float(daily[d]["4. close"])
+                })
+            except Exception:
+                pass
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).set_index("Date")
+        return df
+
+    hist_1y = build_hist(daily, 252)
+    hist_1m = build_hist(daily, 21)
+    hist_1w = build_hist(daily, 7)
+
+    # ── Parse values ─────────────────────────────────────────────────────────
+    def safe_float(v):
+        try: return float(v) if v and v != "None" and v != "-" else None
+        except: return None
+
+    price = safe_float(quote.get("05. price"))
+    prev_close = safe_float(quote.get("08. previous close"))
+    high_52w = safe_float(overview.get("52WeekHigh"))
+    low_52w = safe_float(overview.get("52WeekLow"))
+
+    # 1Y price change from history
+    price_1y = None
+    if not hist_1y.empty and len(hist_1y) > 1:
+        price_1y = (hist_1y["Close"].iloc[-1] - hist_1y["Close"].iloc[0]) / hist_1y["Close"].iloc[0]
+
+    # Market cap
+    mkt_cap = safe_float(overview.get("MarketCapitalization"))
+
+    # P/E ratios
+    pe = safe_float(overview.get("TrailingPE"))
+    fpe = safe_float(overview.get("ForwardPE"))
+    pb = safe_float(overview.get("PriceToBookRatio"))
+    ps = safe_float(overview.get("PriceToSalesRatioTTM"))
+    ev_ebitda = safe_float(overview.get("EVToEBITDA"))
+
+    # Growth & margins — AV gives these as ratios already
+    rev_growth = safe_float(overview.get("QuarterlyRevenueGrowthYOY"))
+    gross_margin = safe_float(overview.get("GrossProfitTTM"))
+    op_margin = safe_float(overview.get("OperatingMarginTTM"))
+    net_margin = safe_float(overview.get("ProfitMargin"))
+    roe = safe_float(overview.get("ReturnOnEquityTTM"))
+    de = safe_float(overview.get("DebtToEquityRatio") or overview.get("LongTermDebtToCapital"))
+    beta = safe_float(overview.get("Beta"))
+    eps = safe_float(overview.get("EPS"))
+    target = safe_float(overview.get("AnalystTargetPrice"))
+
+    # Analyst recommendation
+    rec_raw = overview.get("AnalystRatingStrongBuy","")
+    rec = "BUY" if rec_raw else ""
+
+    # Description
+    desc = (overview.get("Description") or "")[:500]
+    name = overview.get("Name") or ticker
+    sector = overview.get("Sector") or ""
+    industry = overview.get("Industry") or ""
+    exchange = overview.get("Exchange") or "TSX"
+
+    # Earnings date
+    next_earnings = None
+    try:
+        earn_raw = overview.get("NextEarningsDate","") or overview.get("LatestQuarter","")
+        if earn_raw:
+            next_earnings = pd.to_datetime(earn_raw)
+    except Exception:
+        pass
+
+    # News — use AV news sentiment endpoint
+    news = []
+    try:
+        news_data = av_get({
+            "function": "NEWS_SENTIMENT",
+            "tickers": sym,
+            "limit": "6"
+        }, av_key)
+        for item in news_data.get("feed", [])[:6]:
+            news.append(item.get("title",""))
+    except Exception:
+        pass
+
+    return {
+        "symbol": ticker.upper(),
+        "name": name,
+        "sector": sector,
+        "industry": industry,
+        "price": price,
+        "prev_close": prev_close,
+        "mkt_cap": mkt_cap,
+        "pe": pe,
+        "fpe": fpe,
+        "ps": ps,
+        "pb": pb,
+        "ev_ebitda": ev_ebitda,
+        "rev_growth": rev_growth,
+        "gross_margin": gross_margin,
+        "op_margin": op_margin,
+        "net_margin": net_margin,
+        "roe": roe,
+        "de": de,
+        "cr": None,
+        "52h": high_52w,
+        "52l": low_52w,
+        "target": target,
+        "rec": rec,
+        "desc": desc,
+        "exchange": exchange,
+        "hist_1y": hist_1y,
+        "hist_1m": hist_1m,
+        "hist_1w": hist_1w,
+        "next_earnings": next_earnings,
+        "news": news,
+        "price_1y": price_1y,
+        "beta": beta,
+        "eps": eps,
+        "avg_volume": None,
+    }
 
 def get_peers(sector, exchange, exclude):
     peer_map = {
@@ -551,6 +671,15 @@ with st.sidebar:
             api_key = st.secrets["ANTHROPIC_API_KEY"]
         except:
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-lbl">Alpha Vantage Key</div>', unsafe_allow_html=True)
+    av_key = st.text_input("avkey", type="password", placeholder="Enter AV key...", label_visibility="collapsed")
+    if not av_key:
+        try:
+            av_key = st.secrets["AV_API_KEY"]
+        except:
+            av_key = os.environ.get("AV_API_KEY", "")
     st.markdown('<div class="sidebar-hint">console.anthropic.com<br>~$0.002 per brief</div>', unsafe_allow_html=True)
     st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-lbl">Mode</div>', unsafe_allow_html=True)
@@ -700,7 +829,7 @@ if mode == "Single Stock":
 
         with st.spinner(f"Fetching {ticker}..."):
             try:
-                d = fetch_data(ticker)
+                d = fetch_data(ticker, av_key)
             except Exception as e:
                 st.error(f"Could not fetch {ticker}. Check the symbol. `{e}`")
                 st.stop()
@@ -990,14 +1119,14 @@ if mode == "Single Stock":
                     peer_rows = []
                     for p in peers:
                         try:
-                            pi = yf.Ticker(p).info
+                            pd_data = fetch_data(p, av_key)
                             peer_rows.append({
                                 "ticker": p,
-                                "pe": pi.get("trailingPE"),
-                                "fpe": pi.get("forwardPE"),
-                                "rev_growth": pi.get("revenueGrowth"),
-                                "gross_margin": pi.get("grossMargins"),
-                                "mkt_cap": pi.get("marketCap"),
+                                "pe": pd_data.get("pe"),
+                                "fpe": pd_data.get("fpe"),
+                                "rev_growth": pd_data.get("rev_growth"),
+                                "gross_margin": pd_data.get("gross_margin"),
+                                "mkt_cap": pd_data.get("mkt_cap"),
                             })
                         except: pass
 
@@ -1086,7 +1215,7 @@ elif mode == "Portfolio":
         with st.spinner("Fetching portfolio data..."):
             for t in tickers:
                 try:
-                    port_data[t] = fetch_data(t)
+                    port_data[t] = fetch_data(t, av_key)
                 except:
                     st.warning(f"Could not fetch {t} — skipping.")
 
@@ -1224,7 +1353,7 @@ elif mode == "Watchlist":
             with st.spinner("Refreshing watchlist..."):
                 for sym in list(watchlist.keys()):
                     try:
-                        wd = fetch_data(sym)
+                        wd = fetch_data(sym, av_key)
                         prev = get_prev_snapshot(sym)
                         wb = call_claude(build_brief_prompt(wd, prev), api_key)
                         save_snapshot(sym, wd, wb)
