@@ -314,71 +314,115 @@ def av_ticker(ticker):
     return ticker
 
 def fetch_yfinance_fallback(ticker):
-    """Use yfinance to get fundamentals — reliable for TSX tickers."""
+    """Fetch fundamentals via Yahoo Finance — works for TSX tickers."""
+    def sf(v):
+        try: return float(v) if v is not None else None
+        except: return None
+
+    # ── Price history via yf.download (reliable) ─────────────────────────
+    hist_df = pd.DataFrame()
     try:
         import yfinance as yf
-        # Use download for price history (more reliable than Ticker.history)
-        t = yf.Ticker(ticker)
-        
-        # Get info with a timeout-friendly approach
-        try:
-            info = t.info or {}
-        except Exception:
-            info = {}
-
-        # Get price history via download (more reliable)
-        try:
-            hist_raw = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
-            hist_df = hist_raw[["Close"]].copy() if not hist_raw.empty else pd.DataFrame()
-            # Flatten MultiIndex columns if present
+        hist_raw = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
+        if not hist_raw.empty:
+            hist_df = hist_raw[["Close"]].copy()
             if isinstance(hist_df.columns, pd.MultiIndex):
                 hist_df.columns = hist_df.columns.get_level_values(0)
-        except Exception:
-            hist_df = pd.DataFrame()
+    except Exception:
+        pass
 
-        def sf(v):
-            try: return float(v) if v is not None else None
-            except: return None
+    # ── Fundamentals via Yahoo Finance v8 JSON API (no library needed) ───
+    info = {}
+    try:
+        import requests as _req
+        headers = {"User-Agent": "Mozilla/5.0"}
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
+        r = _req.get(url, headers=headers, timeout=10)
+        data = r.json()
+        meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+        info["regularMarketPrice"] = meta.get("regularMarketPrice")
+        info["previousClose"] = meta.get("chartPreviousClose")
+        info["fiftyTwoWeekHigh"] = meta.get("fiftyTwoWeekHigh")
+        info["fiftyTwoWeekLow"] = meta.get("fiftyTwoWeekLow")
+    except Exception:
+        pass
 
-        # If info is empty, try to get at least price from history
-        price = sf(info.get("currentPrice") or info.get("regularMarketPrice"))
-        if price is None and not hist_df.empty:
-            price = float(hist_df["Close"].iloc[-1])
-        
-        prev_close = sf(info.get("previousClose") or info.get("regularMarketPreviousClose"))
-        if prev_close is None and not hist_df.empty and len(hist_df) > 1:
-            prev_close = float(hist_df["Close"].iloc[-2])
+    # ── Fundamentals via Yahoo Finance v10 quoteSummary ──────────────────
+    try:
+        import requests as _req
+        headers = {"User-Agent": "Mozilla/5.0"}
+        modules = "defaultKeyStatistics,financialData,summaryDetail,summaryProfile,recommendationTrend"
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules={modules}"
+        r = _req.get(url, headers=headers, timeout=10)
+        qs = r.json().get("quoteSummary", {}).get("result", [{}])[0] or {}
+        fd = qs.get("financialData", {})
+        sd = qs.get("summaryDetail", {})
+        ks = qs.get("defaultKeyStatistics", {})
+        sp = qs.get("summaryProfile", {})
 
-        return {
-            "price": price,
-            "prev_close": prev_close,
-            "mkt_cap": sf(info.get("marketCap")),
-            "pe": sf(info.get("trailingPE")),
-            "fpe": sf(info.get("forwardPE")),
-            "pb": sf(info.get("priceToBook")),
-            "ps": sf(info.get("priceToSalesTrailing12Months")),
-            "ev_ebitda": sf(info.get("enterpriseToEbitda")),
-            "rev_growth": sf(info.get("revenueGrowth")),
-            "gross_margin": sf(info.get("grossMargins")),
-            "op_margin": sf(info.get("operatingMargins")),
-            "net_margin": sf(info.get("profitMargins")),
-            "roe": sf(info.get("returnOnEquity")),
-            "de": sf(info.get("debtToEquity")),
-            "beta": sf(info.get("beta")),
-            "eps": sf(info.get("trailingEps")),
-            "target": sf(info.get("targetMeanPrice")),
-            "52h": sf(info.get("fiftyTwoWeekHigh")),
-            "52l": sf(info.get("fiftyTwoWeekLow")),
-            "name": info.get("longName") or info.get("shortName") or ticker,
-            "sector": info.get("sector") or "",
-            "industry": info.get("industry") or "",
-            "exchange": info.get("exchange") or "TSX",
-            "desc": (info.get("longBusinessSummary") or "")[:500],
-            "rec": (info.get("recommendationKey") or "").upper(),
-            "hist_df": hist_df,
-        }
-    except Exception as e:
-        return {"_error": str(e)}
+        def gv(d, k): return d.get(k, {}).get("raw") if isinstance(d.get(k), dict) else d.get(k)
+
+        info.update({
+            "marketCap": gv(sd, "marketCap"),
+            "trailingPE": gv(sd, "trailingPE"),
+            "forwardPE": gv(sd, "forwardPE"),
+            "priceToBook": gv(ks, "priceToBook"),
+            "priceToSalesTrailing12Months": gv(sd, "priceToSalesTrailing12Months"),
+            "enterpriseToEbitda": gv(ks, "enterpriseToEbitda"),
+            "revenueGrowth": gv(fd, "revenueGrowth"),
+            "grossMargins": gv(fd, "grossMargins"),
+            "operatingMargins": gv(fd, "operatingMargins"),
+            "profitMargins": gv(fd, "profitMargins"),
+            "returnOnEquity": gv(fd, "returnOnEquity"),
+            "debtToEquity": gv(fd, "debtToEquity"),
+            "beta": gv(sd, "beta"),
+            "trailingEps": gv(ks, "trailingEps"),
+            "targetMeanPrice": gv(fd, "targetMeanPrice"),
+            "currentPrice": gv(fd, "currentPrice"),
+            "longName": qs.get("price", {}).get("longName"),
+            "sector": sp.get("sector", ""),
+            "industry": sp.get("industry", ""),
+            "longBusinessSummary": sp.get("longBusinessSummary", ""),
+        })
+    except Exception:
+        pass
+
+    price = sf(info.get("currentPrice") or info.get("regularMarketPrice"))
+    if price is None and not hist_df.empty:
+        price = float(hist_df["Close"].iloc[-1])
+
+    prev_close = sf(info.get("previousClose"))
+    if prev_close is None and not hist_df.empty and len(hist_df) > 1:
+        prev_close = float(hist_df["Close"].iloc[-2])
+
+    return {
+        "price": price,
+        "prev_close": prev_close,
+        "mkt_cap": sf(info.get("marketCap")),
+        "pe": sf(info.get("trailingPE")),
+        "fpe": sf(info.get("forwardPE")),
+        "pb": sf(info.get("priceToBook")),
+        "ps": sf(info.get("priceToSalesTrailing12Months")),
+        "ev_ebitda": sf(info.get("enterpriseToEbitda")),
+        "rev_growth": sf(info.get("revenueGrowth")),
+        "gross_margin": sf(info.get("grossMargins")),
+        "op_margin": sf(info.get("operatingMargins")),
+        "net_margin": sf(info.get("profitMargins")),
+        "roe": sf(info.get("returnOnEquity")),
+        "de": sf(info.get("debtToEquity")),
+        "beta": sf(info.get("beta")),
+        "eps": sf(info.get("trailingEps")),
+        "target": sf(info.get("targetMeanPrice")),
+        "52h": sf(info.get("fiftyTwoWeekHigh")),
+        "52l": sf(info.get("fiftyTwoWeekLow")),
+        "name": info.get("longName") or ticker,
+        "sector": info.get("sector") or "",
+        "industry": info.get("industry") or "",
+        "exchange": "TSX",
+        "desc": (info.get("longBusinessSummary") or "")[:500],
+        "rec": "",
+        "hist_df": hist_df,
+    }
 
 
 def fetch_data(ticker, av_key=None):
