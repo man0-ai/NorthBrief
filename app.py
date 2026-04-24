@@ -1025,8 +1025,8 @@ if mode == "Single Stock":
 
             # Dynamic row
             h52, l52 = d['52h'] or 0, d['52l'] or 0
-            rng_pct = int(((price - l52)/(h52 - l52))*100) if h52 != l52 else 50
-            from_low_pct = round(((price - l52)/l52)*100, 1) if l52 else 0
+            rng_pct = int(((price - l52)/(h52 - l52))*100) if (price and h52 and l52 and h52 != l52) else 50
+            from_low_pct = round(((price - l52)/l52)*100, 1) if (price and l52) else 0
             upside = round(((d['target'] or price) - price)/price*100, 1) if price else 0
             upside_sign = "+" if upside >= 0 else ""
             upside_cls = "neg" if upside < 0 else ""
@@ -1160,7 +1160,7 @@ if mode == "Single Stock":
                 <div class="stats-strip" style="grid-template-columns:repeat(5,1fr);border-top:1px solid #2A2D35;border-bottom:none;border-radius:8px">
                   <div class="smet"><div class="smlbl">20D MA</div><div class="smval">${ma20:.2f}</div></div>
                   <div class="smet"><div class="smlbl">50D MA</div><div class="smval">${ma50:.2f}</div></div>
-                  <div class="smet"><div class="smlbl">vs 20D MA</div><div class="smval" style="color:{'#00C9A0' if price > ma20 else '#E05050'}">{'+' if price > ma20 else ''}{((price-ma20)/ma20*100):.1f}%</div></div>
+                  <div class="smet"><div class="smlbl">vs 20D MA</div><div class="smval" style="color:{'#00C9A0' if (price and ma20 and price > ma20) else '#E05050'}">{('+' if price > ma20 else '') + f'{((price-ma20)/ma20*100):.1f}%' if (price and ma20) else '—'}</div></div>
                   <div class="smet"><div class="smlbl">Annl. Vol</div><div class="smval">{vol:.1f}%</div></div>
                   <div class="smet"><div class="smlbl">Beta</div><div class="smval">{f"{d['beta']:.2f}" if d['beta'] else '—'}</div></div>
                 </div>
