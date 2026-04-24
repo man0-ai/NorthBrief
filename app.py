@@ -308,9 +308,9 @@ def av_ticker(ticker):
     return ticker
 
 def fmp_get(endpoint, fmp_key, params=None):
-    """Make a request to Financial Modeling Prep API."""
+    """Make a request to FMP stable API."""
     import requests
-    base = "https://financialmodelingprep.com/api/v3"
+    base = "https://financialmodelingprep.com/stable"
     p = {"apikey": fmp_key}
     if params:
         p.update(params)
@@ -319,111 +319,45 @@ def fmp_get(endpoint, fmp_key, params=None):
     return r.json()
 
 def fetch_data(ticker, av_key=None):
-    import requests
-
     sym = ticker.upper()
+    fmp_key = av_key
 
     def sf(v):
         try: return float(v) if v is not None else None
         except: return None
 
-    fmp_key = av_key  # reuse the same key field for FMP
-
-    # ── Quote (price, 52W, market cap) ───────────────────────────────────────
-    quote = {}
-    try:
-        res = fmp_get(f"quote/{sym}", fmp_key)
-        if res and isinstance(res, list):
-            quote = res[0]
-    except Exception:
-        pass
-
-    price      = sf(quote.get("price"))
-    prev_close = sf(quote.get("previousClose"))
-    high_52w   = sf(quote.get("yearHigh"))
-    low_52w    = sf(quote.get("yearLow"))
-    mkt_cap    = sf(quote.get("marketCap"))
-    eps        = sf(quote.get("eps"))
-    pe         = sf(quote.get("pe"))
-    name       = quote.get("name") or sym
-    exchange   = quote.get("exchange") or ("TSX" if ".TO" in sym else "")
-
-    # ── Company Profile (sector, industry, description, beta) ────────────────
+    # ── Quote (free tier: price, mkt cap, 52W, beta, name, sector, desc) ───────
+    price = prev_close = high_52w = low_52w = mkt_cap = eps = pe = None
+    name = sym
+    exchange = "TSX" if ".TO" in sym else ""
     sector = industry = desc = ""
     beta = None
     try:
-        prof = fmp_get(f"profile/{sym}", fmp_key)
-        if prof and isinstance(prof, list):
-            p = prof[0]
-            sector   = p.get("sector") or ""
-            industry = p.get("industry") or ""
-            desc     = (p.get("description") or "")[:500]
-            beta     = sf(p.get("beta"))
-            if not name or name == sym:
-                name = p.get("companyName") or sym
-            if not exchange:
-                exchange = p.get("exchangeShortName") or ""
+        res = fmp_get("quote", fmp_key, {"symbol": sym})
+        q = res[0] if isinstance(res, list) and res else (res if isinstance(res, dict) else {})
+        price      = sf(q.get("price"))
+        prev_close = sf(q.get("previousClose") or q.get("open"))
+        high_52w   = sf(q.get("yearHigh"))
+        low_52w    = sf(q.get("yearLow"))
+        mkt_cap    = sf(q.get("marketCap"))
+        eps        = sf(q.get("eps"))
+        pe         = sf(q.get("pe"))
+        beta       = sf(q.get("beta"))
+        name       = q.get("companyName") or q.get("name") or sym
+        exchange   = q.get("exchange") or exchange
+        sector     = q.get("sector") or ""
+        industry   = q.get("industry") or ""
+        desc       = (q.get("description") or "")[:500]
     except Exception:
         pass
 
-    # ── Key Metrics (P/E ratios, EV/EBITDA, margins, ROE, D/E) ──────────────
+    # ── Ratios / fundamentals (premium — gracefully skip if unavailable) ──────
     fpe = pb = ps = ev_ebitda = rev_growth = None
     gross_margin = op_margin = net_margin = roe = de = None
-    try:
-        km = fmp_get(f"key-metrics-ttm/{sym}", fmp_key)
-        if km and isinstance(km, list):
-            k = km[0]
-            pb        = sf(k.get("pbRatioTTM"))
-            ps        = sf(k.get("priceToSalesRatioTTM"))
-            ev_ebitda = sf(k.get("enterpriseValueOverEBITDATTM"))
-            roe       = sf(k.get("roeTTM"))
-            de        = sf(k.get("debtToEquityTTM"))
-    except Exception:
-        pass
-
-    try:
-        ratios = fmp_get(f"ratios-ttm/{sym}", fmp_key)
-        if ratios and isinstance(ratios, list):
-            r = ratios[0]
-            if pe is None:
-                pe           = sf(r.get("peRatioTTM"))
-            fpe          = sf(r.get("priceEarningsToGrowthRatioTTM"))
-            gross_margin = sf(r.get("grossProfitMarginTTM"))
-            op_margin    = sf(r.get("operatingProfitMarginTTM"))
-            net_margin   = sf(r.get("netProfitMarginTTM"))
-            rev_growth   = sf(r.get("revenueGrowthTTM") or r.get("revenuePerShareTTM"))
-    except Exception:
-        pass
-
-    # ── Revenue growth from income statement ─────────────────────────────────
-    if rev_growth is None:
-        try:
-            inc = fmp_get(f"income-statement-growth/{sym}", fmp_key, {"limit": "2"})
-            if inc and isinstance(inc, list) and len(inc) > 0:
-                rev_growth = sf(inc[0].get("growthRevenue"))
-        except Exception:
-            pass
-
-    # ── Analyst target price ──────────────────────────────────────────────────
     target = None
-    rec    = ""
-    try:
-        pt = fmp_get(f"price-target-consensus/{sym}", fmp_key)
-        if pt and isinstance(pt, list):
-            target = sf(pt[0].get("targetConsensus"))
-        elif pt and isinstance(pt, dict):
-            target = sf(pt.get("targetConsensus"))
-    except Exception:
-        pass
+    rec = ""
 
-    try:
-        rating = fmp_get(f"rating/{sym}", fmp_key)
-        if rating and isinstance(rating, list):
-            rec = (rating[0].get("ratingRecommendation") or "").upper()
-    except Exception:
-        pass
-
-    # ── Price history ─────────────────────────────────────────────────────────
+    # ── Price history via yfinance ────────────────────────────────────────────
     hist_1y = hist_1m = hist_1w = pd.DataFrame()
     try:
         import yfinance as yf
@@ -438,6 +372,10 @@ def fetch_data(ticker, av_key=None):
                 price = float(hist_1y["Close"].iloc[-1])
             if prev_close is None and len(hist_1y) > 1:
                 prev_close = float(hist_1y["Close"].iloc[-2])
+            if high_52w is None:
+                high_52w = float(hist_1y["Close"].max())
+            if low_52w is None:
+                low_52w = float(hist_1y["Close"].min())
     except Exception:
         pass
 
@@ -449,8 +387,8 @@ def fetch_data(ticker, av_key=None):
     # ── News ──────────────────────────────────────────────────────────────────
     news = []
     try:
-        news_data = fmp_get(f"stock_news", fmp_key, {"tickers": sym, "limit": "6"})
-        for item in (news_data or [])[:6]:
+        res = fmp_get("stock-news", fmp_key, {"symbols": sym, "limit": "6"})
+        for item in (res or [])[:6]:
             news.append(item.get("title", ""))
     except Exception:
         pass
