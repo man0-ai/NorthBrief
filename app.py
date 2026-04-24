@@ -7,6 +7,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 from plotly.graph_objs import Figure, Scatter
 
+# DEBUG - remove after fixing
+try:
+    _secrets_keys = list(st.secrets.keys())
+except:
+    _secrets_keys = ["ERROR reading secrets"]
+
 st.set_page_config(
     page_title="NorthBrief",
     page_icon="◆",
@@ -743,6 +749,17 @@ with st.sidebar:
             av_key = st.secrets["AV_API_KEY"]
         except:
             av_key = os.environ.get("AV_API_KEY", "")
+
+    st.markdown(f'<div class="sidebar-hint" style="color:#888">Secrets keys: {_secrets_keys}</div>', unsafe_allow_html=True)
+    # Debug: show whether keys loaded from secrets
+    if api_key:
+        st.markdown('<div class="sidebar-hint" style="color:#00C9A0">✓ Anthropic key loaded</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="sidebar-hint" style="color:#E05050">✗ Anthropic key missing</div>', unsafe_allow_html=True)
+    if av_key:
+        st.markdown('<div class="sidebar-hint" style="color:#00C9A0">✓ AV key loaded</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="sidebar-hint" style="color:#E05050">✗ AV key missing</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-hint">console.anthropic.com<br>~$0.002 per brief</div>', unsafe_allow_html=True)
     st.markdown('<hr style="border:none;border-top:1px solid #2A2D35;margin:1rem 0">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-lbl">Mode</div>', unsafe_allow_html=True)
