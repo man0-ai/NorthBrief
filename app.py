@@ -319,6 +319,8 @@ def fmp_get(endpoint, fmp_key, params=None):
     return r.json()
 
 def fetch_data(ticker, av_key=None):
+    import yfinance as yf
+
     sym = ticker.upper()
     fmp_key = av_key
 
@@ -326,65 +328,142 @@ def fetch_data(ticker, av_key=None):
         try: return float(v) if v is not None else None
         except: return None
 
-    # ── Quote (free tier: price, mkt cap, 52W, beta, name, sector, desc) ───────
-    price = prev_close = high_52w = low_52w = mkt_cap = eps = pe = None
+    def pick(*args):
+        """Return first non-None value."""
+        for a in args:
+            if a is not None:
+                return a
+        return None
+
+    # ── 1. yfinance — primary source for fundamentals ─────────────────────────
+    yf_price = yf_prev = yf_high = yf_low = yf_mkt_cap = None
+    yf_pe = yf_fpe = yf_beta = yf_eps = yf_target = None
+    yf_rev_growth = yf_gross_margin = yf_op_margin = yf_net_margin = None
+    yf_roe = yf_de = yf_pb = yf_ps = yf_ev_ebitda = None
     name = sym
-    exchange = "TSX" if ".TO" in sym else ""
     sector = industry = desc = ""
-    beta = None
+    exchange = "TSX" if ".TO" in sym else ""
+    rec = ""
+
     try:
-        res = fmp_get("quote", fmp_key, {"symbol": sym})
-        q = res[0] if isinstance(res, list) and res else (res if isinstance(res, dict) else {})
-        price      = sf(q.get("price"))
-        prev_close = sf(q.get("previousClose") or q.get("open"))
-        high_52w   = sf(q.get("yearHigh"))
-        low_52w    = sf(q.get("yearLow"))
-        mkt_cap    = sf(q.get("marketCap"))
-        eps        = sf(q.get("eps"))
-        pe         = sf(q.get("pe"))
-        beta       = sf(q.get("beta"))
-        name       = q.get("companyName") or q.get("name") or sym
-        exchange   = q.get("exchange") or exchange
-        sector     = q.get("sector") or ""
-        industry   = q.get("industry") or ""
-        desc       = (q.get("description") or "")[:500]
+        t = yf.Ticker(sym)
+        info = t.info or {}
+
+        yf_price       = sf(info.get("currentPrice") or info.get("regularMarketPrice"))
+        yf_prev        = sf(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+        yf_high        = sf(info.get("fiftyTwoWeekHigh"))
+        yf_low         = sf(info.get("fiftyTwoWeekLow"))
+        yf_mkt_cap     = sf(info.get("marketCap"))
+        yf_pe          = sf(info.get("trailingPE"))
+        yf_fpe         = sf(info.get("forwardPE"))
+        yf_beta        = sf(info.get("beta"))
+        yf_eps         = sf(info.get("trailingEps"))
+        yf_target      = sf(info.get("targetMeanPrice"))
+        yf_rev_growth  = sf(info.get("revenueGrowth"))
+        yf_gross_margin= sf(info.get("grossMargins"))
+        yf_op_margin   = sf(info.get("operatingMargins"))
+        yf_net_margin  = sf(info.get("profitMargins"))
+        yf_roe         = sf(info.get("returnOnEquity"))
+        yf_de          = sf(info.get("debtToEquity"))
+        yf_pb          = sf(info.get("priceToBook"))
+        yf_ps          = sf(info.get("priceToSalesTrailing12Months"))
+        yf_ev_ebitda   = sf(info.get("enterpriseToEbitda"))
+        rec            = (info.get("recommendationKey") or "").upper()
+        name           = info.get("longName") or info.get("shortName") or sym
+        sector         = info.get("sector") or ""
+        industry       = info.get("industry") or ""
+        desc           = (info.get("longBusinessSummary") or "")[:500]
+        exchange       = info.get("exchange") or exchange
     except Exception:
         pass
 
-    # ── Ratios / fundamentals (premium — gracefully skip if unavailable) ──────
-    fpe = pb = ps = ev_ebitda = rev_growth = None
-    gross_margin = op_margin = net_margin = roe = de = None
-    target = None
-    rec = ""
-
-    # ── Price history via yfinance ────────────────────────────────────────────
-    hist_1y = hist_1m = hist_1w = pd.DataFrame()
+    # ── 2. FMP /quote — backup for price, mkt cap, name, sector ─────────────
+    fmp_price = fmp_prev = fmp_high = fmp_low = fmp_mkt_cap = fmp_pe = None
+    fmp_eps = fmp_beta = fmp_name = fmp_sector = fmp_industry = fmp_desc = None
+    fmp_target = fmp_rec = None
     try:
-        import yfinance as yf
+        res = fmp_get("quote", fmp_key, {"symbol": sym})
+        q = res[0] if isinstance(res, list) and res else (res if isinstance(res, dict) else {})
+        fmp_price    = sf(q.get("price"))
+        fmp_prev     = sf(q.get("previousClose"))
+        fmp_high     = sf(q.get("yearHigh"))
+        fmp_low      = sf(q.get("yearLow"))
+        fmp_mkt_cap  = sf(q.get("marketCap"))
+        fmp_pe       = sf(q.get("pe"))
+        fmp_eps      = sf(q.get("eps"))
+        fmp_beta     = sf(q.get("beta"))
+        fmp_name     = q.get("companyName") or q.get("name")
+        fmp_sector   = q.get("sector") or ""
+        fmp_industry = q.get("industry") or ""
+        fmp_desc     = (q.get("description") or "")[:500]
+        fmp_target   = sf(q.get("priceTarget"))
+        fmp_rec      = (q.get("analystRatings") or "").upper()
+    except Exception:
+        pass
+
+    # ── 3. Price history via yf.download (most reliable on Streamlit Cloud) ───
+    hist_1y = hist_1m = hist_1w = pd.DataFrame()
+    dl_price = dl_prev = dl_high = dl_low = None
+    try:
         raw = yf.download(sym, period="1y", progress=False, auto_adjust=True, actions=False)
         if not raw.empty:
             if isinstance(raw.columns, pd.MultiIndex):
                 raw.columns = raw.columns.get_level_values(0)
-            hist_1y = raw[["Close"]].copy()
-            hist_1m = hist_1y.iloc[-21:] if len(hist_1y) >= 21 else hist_1y.copy()
-            hist_1w = hist_1y.iloc[-7:]  if len(hist_1y) >= 7  else hist_1y.copy()
-            if price is None:
-                price = float(hist_1y["Close"].iloc[-1])
-            if prev_close is None and len(hist_1y) > 1:
-                prev_close = float(hist_1y["Close"].iloc[-2])
-            if high_52w is None:
-                high_52w = float(hist_1y["Close"].max())
-            if low_52w is None:
-                low_52w = float(hist_1y["Close"].min())
+            hist_1y  = raw[["Close"]].copy()
+            hist_1m  = hist_1y.iloc[-21:] if len(hist_1y) >= 21 else hist_1y.copy()
+            hist_1w  = hist_1y.iloc[-7:]  if len(hist_1y) >= 7  else hist_1y.copy()
+            dl_price = float(hist_1y["Close"].iloc[-1])
+            dl_prev  = float(hist_1y["Close"].iloc[-2]) if len(hist_1y) > 1 else None
+            dl_high  = float(hist_1y["Close"].max())
+            dl_low   = float(hist_1y["Close"].min())
     except Exception:
         pass
+
+    # ── 4. Derived metrics — calculated from financials if yfinance t.info empty
+    calc_rev_growth = None
+    try:
+        t2 = yf.Ticker(sym)
+        fin = t2.financials
+        if fin is not None and not fin.empty and "Total Revenue" in fin.index:
+            rev = fin.loc["Total Revenue"].dropna()
+            if len(rev) >= 2:
+                calc_rev_growth = (rev.iloc[0] - rev.iloc[1]) / abs(rev.iloc[1])
+    except Exception:
+        pass
+
+    # ── 5. Merge — prefer yfinance, fall back to FMP, then derived ────────────
+    price        = pick(fmp_price, dl_price, yf_price)
+    prev_close   = pick(fmp_prev, dl_prev, yf_prev)
+    high_52w     = pick(fmp_high, dl_high, yf_high)
+    low_52w      = pick(fmp_low, dl_low, yf_low)
+    mkt_cap      = pick(fmp_mkt_cap, yf_mkt_cap)
+    pe           = pick(yf_pe, fmp_pe)
+    fpe          = yf_fpe
+    beta         = pick(yf_beta, fmp_beta)
+    eps          = pick(yf_eps, fmp_eps)
+    target       = pick(yf_target, fmp_target)
+    rev_growth   = pick(yf_rev_growth, calc_rev_growth)
+    gross_margin = yf_gross_margin
+    op_margin    = yf_op_margin
+    net_margin   = yf_net_margin
+    roe          = yf_roe
+    de           = yf_de
+    pb           = yf_pb
+    ps           = yf_ps
+    ev_ebitda    = yf_ev_ebitda
+    rec          = pick(rec, fmp_rec) or ""
+    name         = pick(name if name != sym else None, fmp_name, sym)
+    sector       = pick(sector, fmp_sector, "")
+    industry     = pick(industry, fmp_industry, "")
+    desc         = pick(desc, fmp_desc, "")
+    exchange     = pick(exchange, "TSX" if ".TO" in sym else "")
 
     # ── 1Y return ─────────────────────────────────────────────────────────────
     price_1y = None
     if not hist_1y.empty and len(hist_1y) > 1:
         price_1y = (hist_1y["Close"].iloc[-1] - hist_1y["Close"].iloc[0]) / hist_1y["Close"].iloc[0]
 
-    # ── News ──────────────────────────────────────────────────────────────────
+    # ── News via FMP ──────────────────────────────────────────────────────────
     news = []
     try:
         res = fmp_get("stock-news", fmp_key, {"symbols": sym, "limit": "6"})
