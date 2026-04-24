@@ -560,38 +560,41 @@ Business: {d['desc']}
 Recent headlines: {'; '.join(d['news'][:4]) if d['news'] else 'none available'}
 {prev_context}
 
-STRICT RULES — violating these invalidates your analysis:
-1. EVERY claim must cite a specific number from the data above. Never say "strong margins" — say "48% gross margin". Never say "elevated valuation" — say "P/E of 130x vs sector avg of 28x".
-2. POSITIONING must reflect the actual data:
-   - P/E > 80x with slowing growth → Neutral or Bearish
-   - P/E < 15x with positive growth → Bullish  
-   - Stock within 5% of 52W high + P/E > 2x sector avg → lean Bearish
+STRICT RULES — follow all of these exactly:
+1. EVERY claim must cite a specific number. Never say "strong margins" → say "48% gross margin". Never say "elevated valuation" → say "P/E of 130x vs sector avg of 28x".
+2. ONLY reference metrics that are provided above (not None/n/a). If EV/EBITDA, ROE, or D/E are missing, do not mention them.
+3. POSITIONING must reflect actual data:
+   - P/E > 80x → Neutral or Bearish unless growth > 30%
+   - P/E < 15x with positive growth → Bullish
    - Rev growth < 0% → Bearish unless strong catalyst
-   - DO NOT default to Moderately Bullish — that is a failure mode
-3. conviction: be honest. 5-6 = mixed signals, 7-8 = clear thesis. Most stocks are 5-7.
-4. sentiment MUST match positioning: Bullish/Strongly Bullish → BULLISH, Neutral → NEUTRAL, Bearish/Strongly Bearish → BEARISH
-5. why_moved: include the actual 1Y return percentage and specific price context
-6. market_implied_view: if P/E > 1.5x sector avg → Overvalued. If P/E < 0.8x sector avg → Undervalued.
-7. what_matters_now: what is the market currently focused on for this specific stock
+   - DO NOT default to Moderately Bullish
+4. sentiment MUST match positioning: Strongly/Moderately Bullish → BULLISH, Neutral → NEUTRAL, Strongly/Moderately Bearish → BEARISH
+5. why_moved: structured as: "[X%] 1Y return driven by [1-2 specific factors]. [One sentence on recent momentum]." Keep it factual, not dramatic.
+6. bear_case: NEVER claim >50% downside. Say "valuation could compress toward sector norms" not "70-80% downside".
+7. market_implied_view: P/E > 1.5x sector avg → Overvalued. P/E < 0.8x sector avg → Undervalued.
+8. Avoid jargon where simpler works: "valuation could fall toward sector levels" not "multiple compression via mean reversion".
+9. conviction: 5-6 = mixed signals, 7-8 = clear thesis. Be honest.
+10. street_view field must reflect analyst consensus direction ONLY — never say BUY/SELL/HOLD directly.
 
 Return this exact JSON:
 {{
-  "summary": "2-3 sentences. Must include: what they do, key metric (e.g. revenue growth %), and current price context vs 52W range.",
-  "bull_case": "3-4 sentences. Every sentence must cite a specific number. E.g. '48% gross margins provide...' not 'strong margins'.",
-  "bear_case": "3-4 sentences with specific valuation and risk metrics. Must include P/E vs sector comparison if P/E available.",
-  "verdict": "1-2 direct sentences on risk/reward. Mention specific upside/downside % to target if available.",
+  "summary": "2-3 sentences. Include: business description, key growth/margin metric with number, price position in 52W range.",
+  "bull_case": "3-4 sentences. Every sentence must cite a specific number from the data.",
+  "bear_case": "3-4 sentences. Include P/E vs sector avg. No exaggerated downside claims. Be credible.",
+  "verdict": "1-2 direct sentences on risk/reward at current price. Reference upside to target if available.",
   "key_risk": "Single biggest specific risk in one sentence with a number.",
-  "why_moved": "2-3 sentences. Start with the actual return: 'The X% 1Y return reflects...' Include specific catalysts.",
-  "what_matters_now": "1-2 sentences on what the market is currently focused on for this stock specifically.",
+  "why_moved": "Start: '[X%] 1Y return driven by...' Then one sentence on recent momentum. Max 2 sentences total.",
+  "what_matters_now": "1-2 sentences on what the market is focused on right now for this specific stock.",
   "positioning": "one of: Strongly Bullish / Moderately Bullish / Neutral / Moderately Bearish / Strongly Bearish",
   "conviction": 6,
-  "conviction_rationale": "One honest sentence. If data is missing, say so.",
-  "upside_drivers": ["driver with specific metric", "driver with specific metric", "driver with specific metric"],
-  "downside_drivers": ["risk with specific metric", "risk with specific metric", "risk with specific metric"],
-  "what_would_change": "2-3 sentences with specific catalysts and thresholds that would flip positioning.",
+  "conviction_rationale": "One honest sentence. Mention if key data is missing.",
+  "upside_drivers": ["specific driver with metric", "specific driver with metric", "specific driver with metric"],
+  "downside_drivers": ["specific credible risk with metric", "specific credible risk", "specific credible risk"],
+  "what_would_change": "2-3 sentences with specific catalysts and realistic thresholds that would flip positioning.",
   "market_implied_view": "one of: Overvalued / Fair Value / Undervalued",
   "sentiment": "BULLISH or BEARISH or NEUTRAL",
-  "peer_context": "1-2 sentences with specific peer multiples for comparison.",
+  "street_view": "one of: Positive / Neutral / Cautious",
+  "peer_context": "1-2 sentences comparing valuation to 1-2 specific named peers with their multiples.",
   "what_changed": "If previous snapshot exists, describe material changes with numbers. Otherwise: First analysis for this ticker."
 }}"""
 
@@ -1022,6 +1025,8 @@ if mode == "Single Stock":
             rng_pct = int(((price - l52)/(h52 - l52))*100) if (price and h52 and l52 and h52 != l52) else 50
             from_low_pct = round(((price - l52)/l52)*100, 1) if (price and l52) else 0
             upside = round(((d['target'] or price) - price)/price*100, 1) if price else 0
+            street_view = brief.get('street_view', '')
+            street_color = '#00C9A0' if street_view == 'Positive' else '#E05050' if street_view == 'Cautious' else '#E8A020' 
             upside_sign = "+" if upside >= 0 else ""
             upside_cls = "neg" if upside < 0 else ""
             sc = sentiment_color(sent)
@@ -1055,7 +1060,7 @@ if mode == "Single Stock":
                 <div class="upside-detail">
                   <div><div class="ud-lbl">Current</div><div class="ud-val">{fmt_p(price)}</div></div>
                   <div><div class="ud-lbl">Target</div><div class="ud-val">{fmt_p(d['target'])}</div></div>
-                  <div><div class="ud-lbl">Analyst View</div><div class="ud-val" style="color:{'#00C9A0' if any(x in d['rec'].upper() for x in ['BUY','STRONG']) else '#E05050' if 'SELL' in d['rec'].upper() else '#E8A020'}">{d['rec'].replace('strongbuy','Strong Buy').replace('buy','Buy').replace('hold','Hold').replace('sell','Sell').replace('underperform','Underperform') if d['rec'] else '—'}</div></div>
+                  <div><div class="ud-lbl">Street View</div><div class="ud-val" style="color:{street_color}">{street_view or '—'}</div></div>
                 </div>
               </div>
               <div class="dyn-card">
