@@ -535,36 +535,64 @@ Positioning: {prev_snapshot.get('positioning','—')} | Conviction: {prev_snapsh
 P/E was: {prev_snapshot.get('pe','—')} | Rev Growth was: {prev_snapshot.get('rev_growth','—')}
 Prior verdict: {prev_snapshot.get('verdict','—')}
 """
-    return f"""You are a senior equity analyst at a top-tier institutional firm. Return ONLY valid JSON, no markdown.
+    # Sector P/E benchmarks for valuation context
+    sector_pe = {
+        "Technology": 28, "Energy": 12, "Financials": 13, "Consumer Cyclical": 22,
+        "Industrials": 20, "Materials": 15, "Healthcare": 24, "Real Estate": 30,
+        "Communication Services": 18, "Utilities": 16, "Consumer Defensive": 20,
+    }
+    avg_pe = sector_pe.get(d.get("sector",""), 20)
+    pe_vs_sector = f"vs sector avg ~{avg_pe}x" if d.get("pe") else ""
+    price_vs_52h = round(((d["price"] or 0) / (d["52h"] or 1) - 1) * 100, 1) if d.get("price") and d.get("52h") else None
+    price_vs_52l = round(((d["price"] or 0) / (d["52l"] or 1) - 1) * 100, 1) if d.get("price") and d.get("52l") else None
 
-STOCK: {d['name']} ({d['symbol']}) | {d['sector']} | {d['industry']}
-Price: {fmt_p(d['price'])} | Cap: {fmt_cap(d['mkt_cap'])} | 52W: {fmt_p(d['52l'])}-{fmt_p(d['52h'])}
-P/E: {fmt_x(d['pe'])} | Fwd P/E: {fmt_x(d['fpe'])} | EV/EBITDA: {fmt_x(d['ev_ebitda'])}
-Rev Growth: {fmt_pct(d['rev_growth'])} | Gross Margin: {fmt_pct(d['gross_margin'])} | Op Margin: {fmt_pct(d['op_margin'])}
-ROE: {fmt_pct(d['roe'])} | D/E: {d['de'] if d['de'] else 'n/a'} | Beta: {d['beta'] if d['beta'] else 'n/a'}
-1Y Return: {fmt_pct(d['price_1y'])} | Target: {fmt_p(d['target'])} | Consensus: {d['rec']}
+    return f"""You are a senior equity analyst. Return ONLY valid JSON, no markdown, no commentary outside JSON.
+
+STOCK DATA:
+{d['name']} ({d['symbol']}) | {d['sector']} | {d['industry']}
+Price: {fmt_p(d['price'])} | Mkt Cap: {fmt_cap(d['mkt_cap'])}
+52W Range: {fmt_p(d['52l'])} – {fmt_p(d['52h'])} | vs 52W High: {f"{price_vs_52h}%" if price_vs_52h else "n/a"} | vs 52W Low: {f"+{price_vs_52l}%" if price_vs_52l else "n/a"}
+P/E (TTM): {fmt_x(d['pe'])} {pe_vs_sector} | Fwd P/E: {fmt_x(d['fpe'])} | EV/EBITDA: {fmt_x(d['ev_ebitda'])}
+Rev Growth (YoY): {fmt_pct(d['rev_growth'])} | Gross Margin: {fmt_pct(d['gross_margin'])} | Op Margin: {fmt_pct(d['op_margin'])}
+ROE: {fmt_pct(d['roe'])} | D/E: {d['de'] if d['de'] else 'n/a'} | Beta: {d['beta'] if d['beta'] else 'n/a'} | EPS: {fmt_p(d['eps']) if d.get('eps') else 'n/a'}
+1Y Return: {fmt_pct(d['price_1y'])} | Analyst Target: {fmt_p(d['target'])} | Analyst View: {d['rec'] or 'n/a'}
 Business: {d['desc']}
-Recent headlines: {'; '.join(d['news'][:4])}
+Recent headlines: {'; '.join(d['news'][:4]) if d['news'] else 'none available'}
 {prev_context}
 
-Return JSON (all fields required):
+STRICT RULES — violating these invalidates your analysis:
+1. EVERY claim must cite a specific number from the data above. Never say "strong margins" — say "48% gross margin". Never say "elevated valuation" — say "P/E of 130x vs sector avg of 28x".
+2. POSITIONING must reflect the actual data:
+   - P/E > 80x with slowing growth → Neutral or Bearish
+   - P/E < 15x with positive growth → Bullish  
+   - Stock within 5% of 52W high + P/E > 2x sector avg → lean Bearish
+   - Rev growth < 0% → Bearish unless strong catalyst
+   - DO NOT default to Moderately Bullish — that is a failure mode
+3. conviction: be honest. 5-6 = mixed signals, 7-8 = clear thesis. Most stocks are 5-7.
+4. sentiment MUST match positioning: Bullish/Strongly Bullish → BULLISH, Neutral → NEUTRAL, Bearish/Strongly Bearish → BEARISH
+5. why_moved: include the actual 1Y return percentage and specific price context
+6. market_implied_view: if P/E > 1.5x sector avg → Overvalued. If P/E < 0.8x sector avg → Undervalued.
+7. what_matters_now: what is the market currently focused on for this specific stock
+
+Return this exact JSON:
 {{
-  "summary": "2-3 specific sentences on what the company does and current standing.",
-  "bull_case": "3-4 sentences with specific metrics supporting optimism.",
-  "bear_case": "3-4 sentences with specific risks and weaknesses.",
-  "verdict": "1-2 direct sentences on risk/reward at current levels.",
-  "key_risk": "Single biggest risk in one sentence.",
-  "why_moved": "2-3 sentences explaining the most likely drivers of recent price movement.",
+  "summary": "2-3 sentences. Must include: what they do, key metric (e.g. revenue growth %), and current price context vs 52W range.",
+  "bull_case": "3-4 sentences. Every sentence must cite a specific number. E.g. '48% gross margins provide...' not 'strong margins'.",
+  "bear_case": "3-4 sentences with specific valuation and risk metrics. Must include P/E vs sector comparison if P/E available.",
+  "verdict": "1-2 direct sentences on risk/reward. Mention specific upside/downside % to target if available.",
+  "key_risk": "Single biggest specific risk in one sentence with a number.",
+  "why_moved": "2-3 sentences. Start with the actual return: 'The X% 1Y return reflects...' Include specific catalysts.",
+  "what_matters_now": "1-2 sentences on what the market is currently focused on for this stock specifically.",
   "positioning": "one of: Strongly Bullish / Moderately Bullish / Neutral / Moderately Bearish / Strongly Bearish",
-  "conviction": 7,
-  "conviction_rationale": "One sentence explaining the conviction score.",
-  "upside_drivers": ["driver 1", "driver 2", "driver 3"],
-  "downside_drivers": ["risk 1", "risk 2", "risk 3"],
-  "what_would_change": "2-3 sentences on specific catalysts that would flip this positioning.",
+  "conviction": 6,
+  "conviction_rationale": "One honest sentence. If data is missing, say so.",
+  "upside_drivers": ["driver with specific metric", "driver with specific metric", "driver with specific metric"],
+  "downside_drivers": ["risk with specific metric", "risk with specific metric", "risk with specific metric"],
+  "what_would_change": "2-3 sentences with specific catalysts and thresholds that would flip positioning.",
   "market_implied_view": "one of: Overvalued / Fair Value / Undervalued",
   "sentiment": "BULLISH or BEARISH or NEUTRAL",
-  "peer_context": "1-2 sentences on valuation vs sector peers.",
-  "what_changed": "If previous snapshot provided describe what changed materially. Otherwise: First analysis for this ticker."
+  "peer_context": "1-2 sentences with specific peer multiples for comparison.",
+  "what_changed": "If previous snapshot exists, describe material changes with numbers. Otherwise: First analysis for this ticker."
 }}"""
 
 def build_portfolio_prompt(tickers_data):
@@ -589,7 +617,7 @@ Return JSON:
 def call_claude(prompt, api_key):
     client = anthropic.Anthropic(api_key=api_key)
     msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model="claude-sonnet-4-5-20251001",
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -909,11 +937,11 @@ if mode == "Single Stock":
         st.markdown(f"""
         <div class="stats-strip">
           <div class="smet"><div class="smlbl">Mkt Cap</div><div class="smval">{fmt_cap(d['mkt_cap'])}</div></div>
-          <div class="smet"><div class="smlbl">P/E Trail</div><div class="smval">{fmt_x(d['pe'])}</div></div>
-          <div class="smet"><div class="smlbl">P/E Fwd</div><div class="smval">{fmt_x(d['fpe'])}</div></div>
-          <div class="smet"><div class="smlbl">Rev Growth</div><div class="smval">{fmt_pct(d['rev_growth'])}</div></div>
-          <div class="smet"><div class="smlbl">Gross Mgn</div><div class="smval">{fmt_pct(d['gross_margin'])}</div></div>
-          <div class="smet"><div class="smlbl">Analyst Tgt</div><div class="smval">{fmt_p(d['target'])}</div></div>
+          <div class="smet"><div class="smlbl">P/E (TTM)</div><div class="smval">{fmt_x(d['pe'])}</div></div>
+          <div class="smet"><div class="smlbl">P/E (Fwd Est.)</div><div class="smval">{fmt_x(d['fpe'])}</div></div>
+          <div class="smet"><div class="smlbl">Rev Growth (YoY)</div><div class="smval">{fmt_pct(d['rev_growth'])}</div></div>
+          <div class="smet"><div class="smlbl">Gross Margin</div><div class="smval">{fmt_pct(d['gross_margin'])}</div></div>
+          <div class="smet"><div class="smlbl">Analyst Target</div><div class="smval">{fmt_p(d['target'])}</div></div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1027,7 +1055,7 @@ if mode == "Single Stock":
                 <div class="upside-detail">
                   <div><div class="ud-lbl">Current</div><div class="ud-val">{fmt_p(price)}</div></div>
                   <div><div class="ud-lbl">Target</div><div class="ud-val">{fmt_p(d['target'])}</div></div>
-                  <div><div class="ud-lbl">Consensus</div><div class="ud-val" style="color:{'#00C9A0' if 'BUY' in d['rec'] else '#E05050' if 'SELL' in d['rec'] else '#E8A020'}">{d['rec'] or '—'}</div></div>
+                  <div><div class="ud-lbl">Analyst View</div><div class="ud-val" style="color:{'#00C9A0' if any(x in d['rec'].upper() for x in ['BUY','STRONG']) else '#E05050' if 'SELL' in d['rec'].upper() else '#E8A020'}">{d['rec'].replace('strongbuy','Strong Buy').replace('buy','Buy').replace('hold','Hold').replace('sell','Sell').replace('underperform','Underperform') if d['rec'] else '—'}</div></div>
                 </div>
               </div>
               <div class="dyn-card">
@@ -1060,6 +1088,15 @@ if mode == "Single Stock":
               <div class="sbody">{brief.get('why_moved','—')}</div>
             </div>
             """, unsafe_allow_html=True)
+
+            # What Matters Now
+            if brief.get('what_matters_now'):
+                st.markdown(f"""
+                <div class="dyn-card" style="margin-bottom:1rem;border-left:3px solid #E8A020">
+                  <div class="slbl" style="color:#E8A020;margin-bottom:8px">What The Market Is Focused On</div>
+                  <div class="sbody">{brief.get('what_matters_now','—')}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
             # Upside / Downside drivers
             up_drivers = brief.get('upside_drivers', [])
