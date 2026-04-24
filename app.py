@@ -333,18 +333,19 @@ def fetch_data(ticker, av_key=None):
         quote = {}
 
     # ── Daily price history ──────────────────────────────────────────────────
+    time.sleep(1)  # avoid AV rate limit (5 req/min free tier)
     try:
         hist_data = av_get({
             "function": "TIME_SERIES_DAILY",
             "symbol": sym,
-            "outputsize": "full"
+            "outputsize": "compact"
         }, av_key)
         daily = hist_data.get("Time Series (Daily)", {})
         if not daily:
             hist_data = av_get({
                 "function": "TIME_SERIES_DAILY",
                 "symbol": ticker.upper(),
-                "outputsize": "full"
+                "outputsize": "compact"
             }, av_key)
             daily = hist_data.get("Time Series (Daily)", {})
     except Exception:
@@ -400,7 +401,7 @@ def fetch_data(ticker, av_key=None):
 
     # Growth & margins — AV gives these as ratios already
     rev_growth = safe_float(overview.get("QuarterlyRevenueGrowthYOY"))
-    gross_margin = safe_float(overview.get("GrossProfitMargin") or overview.get("GrossProfitTTM"))
+    gross_margin = safe_float(overview.get("GrossProfitMargin"))
     op_margin = safe_float(overview.get("OperatingMarginTTM"))
     net_margin = safe_float(overview.get("ProfitMargin"))
     roe = safe_float(overview.get("ReturnOnEquityTTM"))
@@ -852,14 +853,16 @@ if mode == "Single Stock":
                     st.stop()
 
         # ── TICKER BAND ───────────────────────────────────────────────────────
-        price = d['price'] or 0
+        price = d['price']
         prev  = d['prev_close'] or price
-        chg   = price - prev
+        chg   = (price - prev) if (price and prev) else 0
         chg_p = (chg/prev*100) if prev else 0
         sign  = "+" if chg >= 0 else ""
         sent  = brief.get("sentiment","NEUTRAL")
         bc    = badge_class(sent)
         meta  = " · ".join(p for p in [d['symbol'], d['exchange'], d['sector']] if p)
+        price_str = fmt_p(price) if price else "—"
+        chg_str = f"{sign}{chg:.2f} ({sign}{chg_p:.2f}%)" if price else ""
 
         st.markdown(f"""
         <div class="ticker-band">
@@ -868,8 +871,8 @@ if mode == "Single Stock":
             <div class="tb-meta">{meta}</div>
           </div>
           <div style="display:flex;align-items:baseline;gap:10px">
-            <span class="tb-price">{fmt_p(price)}</span>
-            <span class="tb-chg">{sign}{chg:.2f} ({sign}{chg_p:.2f}%)</span>
+            <span class="tb-price">{price_str}</span>
+            <span class="tb-chg">{chg_str}</span>
           </div>
         </div>
         """, unsafe_allow_html=True)
