@@ -307,17 +307,65 @@ def av_ticker(ticker):
         return ticker.replace(".V", ".CNX")
     return ticker
 
+def fetch_yfinance_fallback(ticker):
+    """Use yfinance to get fundamentals — reliable for TSX tickers."""
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        info = t.info or {}
+        hist = t.history(period="1y")
+
+        def sf(v):
+            try: return float(v) if v is not None else None
+            except: return None
+
+        hist_df = pd.DataFrame()
+        if not hist.empty:
+            hist_df = hist[["Close"]].copy()
+
+        return {
+            "price": sf(info.get("currentPrice") or info.get("regularMarketPrice")),
+            "prev_close": sf(info.get("previousClose") or info.get("regularMarketPreviousClose")),
+            "mkt_cap": sf(info.get("marketCap")),
+            "pe": sf(info.get("trailingPE")),
+            "fpe": sf(info.get("forwardPE")),
+            "pb": sf(info.get("priceToBook")),
+            "ps": sf(info.get("priceToSalesTrailing12Months")),
+            "ev_ebitda": sf(info.get("enterpriseToEbitda")),
+            "rev_growth": sf(info.get("revenueGrowth")),
+            "gross_margin": sf(info.get("grossMargins")),
+            "op_margin": sf(info.get("operatingMargins")),
+            "net_margin": sf(info.get("profitMargins")),
+            "roe": sf(info.get("returnOnEquity")),
+            "de": sf(info.get("debtToEquity")),
+            "beta": sf(info.get("beta")),
+            "eps": sf(info.get("trailingEps")),
+            "target": sf(info.get("targetMeanPrice")),
+            "52h": sf(info.get("fiftyTwoWeekHigh")),
+            "52l": sf(info.get("fiftyTwoWeekLow")),
+            "name": info.get("longName") or info.get("shortName") or ticker,
+            "sector": info.get("sector") or "",
+            "industry": info.get("industry") or "",
+            "exchange": info.get("exchange") or "TSX",
+            "desc": (info.get("longBusinessSummary") or "")[:500],
+            "rec": (info.get("recommendationKey") or "").upper(),
+            "hist_df": hist_df,
+        }
+    except Exception:
+        return {}
+
+
 def fetch_data(ticker, av_key=None):
     import requests
     import time
 
     sym = av_ticker(ticker.upper())
+    is_canadian = ticker.upper().endswith(".TO") or ticker.upper().endswith(".V")
 
     # ── Company Overview ─────────────────────────────────────────────────────
     try:
         overview = av_get({"function": "OVERVIEW", "symbol": sym}, av_key)
         if not overview or "Symbol" not in overview:
-            # Try without exchange suffix for US tickers
             overview = av_get({"function": "OVERVIEW", "symbol": ticker.upper()}, av_key)
     except Exception:
         overview = {}
@@ -331,6 +379,11 @@ def fetch_data(ticker, av_key=None):
             quote = quote_data.get("Global Quote", {})
     except Exception:
         quote = {}
+
+    # ── yfinance fallback for Canadian tickers ───────────────────────────────
+    yf_data = {}
+    if is_canadian or not overview or "Symbol" not in overview:
+        yf_data = fetch_yfinance_fallback(ticker.upper())
 
     # ── Daily price history ──────────────────────────────────────────────────
     time.sleep(1)  # avoid AV rate limit (5 req/min free tier)
@@ -374,52 +427,61 @@ def fetch_data(ticker, av_key=None):
     hist_1m = build_hist(daily, 21)
     hist_1w = build_hist(daily, 7)
 
-    # ── Parse values ─────────────────────────────────────────────────────────
+    # ── Parse values — prefer yfinance for Canadian, AV for US ─────────────
     def safe_float(v):
         try: return float(v) if v and v != "None" and v != "-" else None
         except: return None
 
-    price = safe_float(quote.get("05. price"))
-    prev_close = safe_float(quote.get("08. previous close"))
-    high_52w = safe_float(overview.get("52WeekHigh"))
-    low_52w = safe_float(overview.get("52WeekLow"))
+    def pick(av_val, yf_key):
+        """Use AV value if available, else fall back to yfinance."""
+        v = safe_float(av_val)
+        if v is not None:
+            return v
+        return yf_data.get(yf_key)
 
-    # 1Y price change from history
+    # Price: prefer AV GLOBAL_QUOTE (real-time), fall back to yfinance
+    price = safe_float(quote.get("05. price")) or yf_data.get("price")
+    prev_close = safe_float(quote.get("08. previous close")) or yf_data.get("prev_close")
+    high_52w = pick(overview.get("52WeekHigh"), "52h")
+    low_52w = pick(overview.get("52WeekLow"), "52l")
+
+    # 1Y price change — use yfinance hist if AV hist empty
     price_1y = None
-    if not hist_1y.empty and len(hist_1y) > 1:
-        price_1y = (hist_1y["Close"].iloc[-1] - hist_1y["Close"].iloc[0]) / hist_1y["Close"].iloc[0]
+    yf_hist = yf_data.get("hist_df", pd.DataFrame())
+    use_hist = hist_1y if not hist_1y.empty else yf_hist
+    if not use_hist.empty and len(use_hist) > 1:
+        price_1y = (use_hist["Close"].iloc[-1] - use_hist["Close"].iloc[0]) / use_hist["Close"].iloc[0]
+    if not hist_1y.empty:
+        pass  # keep AV hist for charts
+    elif not yf_hist.empty:
+        hist_1y = yf_hist
+        hist_1m = yf_hist.iloc[-21:] if len(yf_hist) >= 21 else yf_hist
+        hist_1w = yf_hist.iloc[-7:] if len(yf_hist) >= 7 else yf_hist
 
-    # Market cap
-    mkt_cap = safe_float(overview.get("MarketCapitalization"))
+    mkt_cap = pick(overview.get("MarketCapitalization"), "mkt_cap")
+    pe = pick(overview.get("TrailingPE"), "pe")
+    fpe = pick(overview.get("ForwardPE"), "fpe")
+    pb = pick(overview.get("PriceToBookRatio"), "pb")
+    ps = pick(overview.get("PriceToSalesRatioTTM"), "ps")
+    ev_ebitda = pick(overview.get("EVToEBITDA"), "ev_ebitda")
+    rev_growth = pick(overview.get("QuarterlyRevenueGrowthYOY"), "rev_growth")
+    gross_margin = pick(overview.get("GrossProfitMargin"), "gross_margin")
+    op_margin = pick(overview.get("OperatingMarginTTM"), "op_margin")
+    net_margin = pick(overview.get("ProfitMargin"), "net_margin")
+    roe = pick(overview.get("ReturnOnEquityTTM"), "roe")
+    de = pick(overview.get("DebtToEquityRatio") or overview.get("LongTermDebtToCapital"), "de")
+    beta = pick(overview.get("Beta"), "beta")
+    eps = pick(overview.get("EPS"), "eps")
+    target = pick(overview.get("AnalystTargetPrice"), "target")
 
-    # P/E ratios
-    pe = safe_float(overview.get("TrailingPE"))
-    fpe = safe_float(overview.get("ForwardPE"))
-    pb = safe_float(overview.get("PriceToBookRatio"))
-    ps = safe_float(overview.get("PriceToSalesRatioTTM"))
-    ev_ebitda = safe_float(overview.get("EVToEBITDA"))
-
-    # Growth & margins — AV gives these as ratios already
-    rev_growth = safe_float(overview.get("QuarterlyRevenueGrowthYOY"))
-    gross_margin = safe_float(overview.get("GrossProfitMargin"))
-    op_margin = safe_float(overview.get("OperatingMarginTTM"))
-    net_margin = safe_float(overview.get("ProfitMargin"))
-    roe = safe_float(overview.get("ReturnOnEquityTTM"))
-    de = safe_float(overview.get("DebtToEquityRatio") or overview.get("LongTermDebtToCapital"))
-    beta = safe_float(overview.get("Beta"))
-    eps = safe_float(overview.get("EPS"))
-    target = safe_float(overview.get("AnalystTargetPrice"))
-
-    # Analyst recommendation
     rec_raw = overview.get("AnalystRatingStrongBuy","")
-    rec = "BUY" if rec_raw else ""
+    rec = yf_data.get("rec","") if not rec_raw else ("BUY" if rec_raw else "")
 
-    # Description
-    desc = (overview.get("Description") or "")[:500]
-    name = overview.get("Name") or ticker
-    sector = overview.get("Sector") or ""
-    industry = overview.get("Industry") or ""
-    exchange = overview.get("Exchange") or "TSX"
+    desc = (overview.get("Description") or yf_data.get("desc",""))[:500]
+    name = overview.get("Name") or yf_data.get("name") or ticker
+    sector = overview.get("Sector") or yf_data.get("sector","")
+    industry = overview.get("Industry") or yf_data.get("industry","")
+    exchange = overview.get("Exchange") or yf_data.get("exchange","TSX")
 
     # Earnings date
     next_earnings = None
