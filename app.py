@@ -400,7 +400,7 @@ def fetch_data(ticker, av_key=None):
 
     # Growth & margins — AV gives these as ratios already
     rev_growth = safe_float(overview.get("QuarterlyRevenueGrowthYOY"))
-    gross_margin = safe_float(overview.get("GrossProfitTTM"))
+    gross_margin = safe_float(overview.get("GrossProfitMargin") or overview.get("GrossProfitTTM"))
     op_margin = safe_float(overview.get("OperatingMarginTTM"))
     net_margin = safe_float(overview.get("ProfitMargin"))
     roe = safe_float(overview.get("ReturnOnEquityTTM"))
@@ -819,10 +819,6 @@ if mode == "Single Stock":
     active_ticker = (ticker_input or st.session_state.ticker_prefill).strip().upper()
 
     if should_generate and active_ticker:
-        if not api_key:
-            st.error("Add your Anthropic API key in the sidebar.")
-            st.stop()
-
         ticker = active_ticker
         st.session_state.auto_generate = False
         st.session_state.ticker_prefill = ticker
@@ -834,19 +830,26 @@ if mode == "Single Stock":
                 st.error(f"Could not fetch {ticker}. Check the symbol. `{e}`")
                 st.stop()
 
-        with st.spinner("Writing brief..."):
-            try:
-                prev_snap = get_prev_snapshot(ticker)
-                brief = call_claude(build_brief_prompt(d, prev_snap), api_key)
-                st.session_state.last_brief = brief
-                st.session_state.last_data = d
-                st.session_state.brief_generated = True
-                save_snapshot(ticker, d, brief)
-                st.session_state[f"wl_brief_{ticker}"] = brief
-                st.session_state[f"wl_data_{ticker}"] = d
-            except Exception as e:
-                st.error(f"Brief failed: `{e}`")
-                st.stop()
+        if not api_key:
+            # Show market data but skip the AI brief
+            st.session_state.last_data = d
+            st.session_state.brief_generated = True
+            brief = {"summary": "Add your Anthropic API key in the sidebar to generate an AI brief.", "bull_case": "", "bear_case": "", "verdict": "", "key_risk": "", "sentiment": "NEUTRAL", "conviction": 0, "conviction_label": "No Key", "conviction_rationale": "Add your Anthropic API key to unlock the AI analyst.", "upside_drivers": [], "downside_drivers": [], "what_would_change": "", "why_moved": "Add your Anthropic API key to unlock price movement analysis.", "market_implied": "FAIR VALUE", "peers": [], "history": []}
+            st.session_state.last_brief = brief
+        else:
+            with st.spinner("Writing brief..."):
+                try:
+                    prev_snap = get_prev_snapshot(ticker)
+                    brief = call_claude(build_brief_prompt(d, prev_snap), api_key)
+                    st.session_state.last_brief = brief
+                    st.session_state.last_data = d
+                    st.session_state.brief_generated = True
+                    save_snapshot(ticker, d, brief)
+                    st.session_state[f"wl_brief_{ticker}"] = brief
+                    st.session_state[f"wl_data_{ticker}"] = d
+                except Exception as e:
+                    st.error(f"Brief failed: `{e}`")
+                    st.stop()
 
         # ── TICKER BAND ───────────────────────────────────────────────────────
         price = d['price'] or 0
