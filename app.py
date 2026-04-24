@@ -317,21 +317,41 @@ def fetch_yfinance_fallback(ticker):
     """Use yfinance to get fundamentals — reliable for TSX tickers."""
     try:
         import yfinance as yf
+        # Use download for price history (more reliable than Ticker.history)
         t = yf.Ticker(ticker)
-        info = t.info or {}
-        hist = t.history(period="1y")
+        
+        # Get info with a timeout-friendly approach
+        try:
+            info = t.info or {}
+        except Exception:
+            info = {}
+
+        # Get price history via download (more reliable)
+        try:
+            hist_raw = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
+            hist_df = hist_raw[["Close"]].copy() if not hist_raw.empty else pd.DataFrame()
+            # Flatten MultiIndex columns if present
+            if isinstance(hist_df.columns, pd.MultiIndex):
+                hist_df.columns = hist_df.columns.get_level_values(0)
+        except Exception:
+            hist_df = pd.DataFrame()
 
         def sf(v):
             try: return float(v) if v is not None else None
             except: return None
 
-        hist_df = pd.DataFrame()
-        if not hist.empty:
-            hist_df = hist[["Close"]].copy()
+        # If info is empty, try to get at least price from history
+        price = sf(info.get("currentPrice") or info.get("regularMarketPrice"))
+        if price is None and not hist_df.empty:
+            price = float(hist_df["Close"].iloc[-1])
+        
+        prev_close = sf(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+        if prev_close is None and not hist_df.empty and len(hist_df) > 1:
+            prev_close = float(hist_df["Close"].iloc[-2])
 
         return {
-            "price": sf(info.get("currentPrice") or info.get("regularMarketPrice")),
-            "prev_close": sf(info.get("previousClose") or info.get("regularMarketPreviousClose")),
+            "price": price,
+            "prev_close": prev_close,
             "mkt_cap": sf(info.get("marketCap")),
             "pe": sf(info.get("trailingPE")),
             "fpe": sf(info.get("forwardPE")),
@@ -357,8 +377,8 @@ def fetch_yfinance_fallback(ticker):
             "rec": (info.get("recommendationKey") or "").upper(),
             "hist_df": hist_df,
         }
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"_error": str(e)}
 
 
 def fetch_data(ticker, av_key=None):
@@ -390,6 +410,10 @@ def fetch_data(ticker, av_key=None):
     yf_data = {}
     if is_canadian or not overview or "Symbol" not in overview:
         yf_data = fetch_yfinance_fallback(ticker.upper())
+        if "_error" in yf_data:
+            import streamlit as _st
+            _st.session_state["yf_debug"] = yf_data["_error"]
+            yf_data = {}
 
     # ── Daily price history ──────────────────────────────────────────────────
     time.sleep(1)  # avoid AV rate limit (5 req/min free tier)
@@ -751,6 +775,9 @@ with st.sidebar:
             av_key = os.environ.get("AV_API_KEY", "")
 
     st.markdown(f'<div class="sidebar-hint" style="color:#888">Secrets keys: {_secrets_keys}</div>', unsafe_allow_html=True)
+    # Show yfinance debug info if available
+    if 'yf_debug' in st.session_state:
+        st.markdown(f'<div class="sidebar-hint" style="color:#E05050">YF error: {st.session_state.yf_debug}</div>', unsafe_allow_html=True)
     # Debug: show whether keys loaded from secrets
     if api_key:
         st.markdown('<div class="sidebar-hint" style="color:#00C9A0">✓ Anthropic key loaded</div>', unsafe_allow_html=True)
